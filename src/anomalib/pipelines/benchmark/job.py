@@ -184,6 +184,11 @@ class BenchmarkJob(Job):
             engine.fit(self.model, self.datamodule)
             test_start_time = time.time()
             test_results = engine.test(self.model, self.datamodule)
+
+        print("debug test_results:", test_results)
+        print()
+        print("type:",type(test_results))
+
         job_end_time = time.time()
         durations = {
             "job_duration": job_end_time - job_start_time,
