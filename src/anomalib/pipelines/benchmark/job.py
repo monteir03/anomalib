@@ -49,6 +49,13 @@ from anomalib.models import AnomalibModule
 from anomalib.pipelines.components import Job
 from anomalib.utils.logging import hide_output
 
+####################
+### Personalized ###
+####################
+from anomalib.metrics import Evaluator, AUROC, F1Score , AUPRO, AUPR
+from anomalib.loggers import AnomalibMLFlowLogger
+from anomalib.visualization import ImageVisualizer
+
 logger = logging.getLogger(__name__)
 
 
@@ -107,8 +114,10 @@ class BenchmarkJob(Job):
         self.datamodule = datamodule
         self.seed = seed
         self.flat_cfg = flat_cfg
+        self.mlflow_save_dir = "/mnt/data02/anomalib/mlruns"
+        self.visualize_dir = "/mnt/data02/anomalib/visualize"
 
-    @hide_output
+    #@hide_output
     def run(
         self,
         task_id: int | None = None,
@@ -137,10 +146,39 @@ class BenchmarkJob(Job):
             logger.info(f"Running job {self.model.__class__.__name__} with device {task_id}")
         with TemporaryDirectory() as temp_dir:
             seed_everything(self.seed)
+            ####################
+            ### Personalized ###
+            ####################
+            image_metrics = [
+                AUROC(fields=["pred_score", "gt_label"], prefix="image_"),
+                AUPR(fields=["pred_score", "gt_label"], prefix="image_"),
+                F1Score(fields=["pred_label", "gt_label"], prefix="image_"),
+            ]
+            pixel_metrics = [
+                AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_"),
+                AUPR(fields=["anomaly_map", "gt_mask"], prefix="pixel_"),
+                AUPRO(fields=["anomaly_map", "gt_mask"], prefix="pixel_"),
+                F1Score(fields=["pred_mask", "gt_mask"], prefix="pixel_"),
+            ]
+            evaluator =  Evaluator(test_metrics=[*image_metrics, *pixel_metrics])
+            #The Anomalib_module model has it's own evaltors by default, so we need to override them.
+            self.model.evaluator = evaluator
+            run_name = f"{self.model.name}_{self.datamodule.name}_{self.datamodule.category}"
+            self.model.visualizer = ImageVisualizer(output_dir=Path(self.visualize_dir) / run_name)
+
+            mlflow_logger = AnomalibMLFlowLogger(
+                experiment_name=self.model.name,
+                run_name=run_name,
+                save_dir=self.mlflow_save_dir,
+            )
+            ####################
+            ### Personalized ###
+            ####################
             engine = Engine(
                 accelerator=self.accelerator,
                 devices=devices,
                 default_root_dir=temp_dir,
+                logger=mlflow_logger,
             )
             fit_start_time = time.time()
             engine.fit(self.model, self.datamodule)
