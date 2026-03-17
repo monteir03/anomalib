@@ -116,6 +116,7 @@ class BenchmarkJob(Job):
         self.flat_cfg = flat_cfg
         self.mlflow_save_dir = "/mnt/data02/anomalib/mlruns"
         self.visualize_dir = "/mnt/data02/anomalib/visualize"
+        self.metrics_path = "/mnt/data02/anomalib/item_metrics" #where individual metrics are saved
 
     #@hide_output
     def run(
@@ -164,7 +165,8 @@ class BenchmarkJob(Job):
             #The Anomalib_module model has it's own evaltors by default, so we need to override them.
             self.model.evaluator = evaluator
             run_name = f"{self.model.name}_{self.datamodule.name}_{self.datamodule.category}"
-            self.model.visualizer = ImageVisualizer(output_dir=Path(self.visualize_dir) / run_name)
+            self.model.visualizer = ImageVisualizer(output_dir=Path(self.visualize_dir) / run_name, 
+                                                    metrics_csv = Path(self.metrics_path) / run_name)
 
             mlflow_logger = AnomalibMLFlowLogger(
                 experiment_name=self.model.name,
@@ -185,9 +187,7 @@ class BenchmarkJob(Job):
             test_start_time = time.time()
             test_results = engine.test(self.model, self.datamodule)
 
-        print("debug test_results:", test_results)
-        print()
-        print("type:",type(test_results))
+    
 
         job_end_time = time.time()
         durations = {

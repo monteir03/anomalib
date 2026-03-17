@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from PIL import Image
+import csv #new
+from pprint import pprint
 
 # Only import types during type checking to avoid circular imports
 if TYPE_CHECKING:
@@ -43,6 +45,7 @@ if TYPE_CHECKING:
 
 from anomalib.utils.path import generate_output_filename
 from anomalib.visualization.base import Visualizer
+from anomalib.metrics import AUROC, AUPR #New
 
 from .item_visualizer import (
     DEFAULT_FIELDS_CONFIG,
@@ -176,6 +179,8 @@ class ImageVisualizer(Visualizer):
         overlay_fields_config: dict[str, dict[str, Any]] | None = None,
         text_config: dict[str, Any] | None = None,
         output_dir: str | Path | None = None,
+        metrics_csv: str | Path | None = None,  # NEW
+
     ) -> None:
         super().__init__()
         self.fields = fields or ["image", "gt_mask"]
@@ -185,6 +190,62 @@ class ImageVisualizer(Visualizer):
         self.overlay_fields_config = {**DEFAULT_OVERLAY_FIELDS_CONFIG, **(overlay_fields_config or {})}
         self.text_config = {**DEFAULT_TEXT_CONFIG, **(text_config or {})}
         self.output_dir = output_dir
+
+        #  New
+        self.metrics_csv = Path(metrics_csv) if metrics_csv else None
+        if self.metrics_csv:
+            self._init_metrics_csv()
+
+    #new
+    def _init_metrics_csv(self):
+        self.metrics_csv.parent.mkdir(parents=True, exist_ok=True)  # add this line
+        if not self.metrics_csv.exists():
+            with open(self.metrics_csv, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "image_path",
+                    "vis_image_path",
+                    "pred_score",
+                    "pred_label",
+                    "pixel_auroc",
+                    "pixel_aupr",
+                ])
+       
+    
+    #New 
+    def _compute_and_save_metrics(self, item, vis_filename: Path | None):
+        from anomalib.data import ImageItem, NumpyImageItem
+
+        if not (hasattr(item, "gt_mask") and item.gt_mask is not None
+                and hasattr(item, "anomaly_map") and item.anomaly_map is not None):
+            return
+
+        results = {}
+
+        for metric_cls, key in [
+            (AUROC, "pixel_auroc"),
+            (AUPR, "pixel_aupr"),
+        ]:
+            try:
+                m = metric_cls(fields=["anomaly_map", "gt_mask"])
+                m.update(item)  # pass the full item, not flattened tensors
+                results[key] = float(m.compute())
+                m.reset()
+            except Exception as e:
+                print(f"Erro ao calcular {key} para {item.image_path or 'unknown'}: {e}")
+                results[key] = None
+
+        if self.metrics_csv:
+            with open(self.metrics_csv, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    str(item.image_path or "unknown"),
+                    str(vis_filename) if vis_filename else "none",
+                    float(item.pred_score) if item.pred_score is not None else "",
+                    str(item.pred_label) if item.pred_label is not None else "",
+                    results.get("pixel_auroc", ""),
+                    results.get("pixel_aupr", ""),
+                ])
 
     def visualize(
         self,
@@ -352,7 +413,13 @@ class ImageVisualizer(Visualizer):
         if self.output_dir is None:
             self.output_dir = Path(trainer.default_root_dir) / "images"
 
+        first = True
         for item in batch:
+            if first:
+                print("#######DEBUG_ITEM########")
+                pprint(dir(item))
+                first = False
+
             image = visualize_image_item(
                 item,
                 fields=self.fields,
@@ -363,6 +430,7 @@ class ImageVisualizer(Visualizer):
                 text_config=self.text_config,
             )
 
+            filename = None
             if image is not None:
                 # Get the dataset name and category to save the image
                 datamodule = getattr(trainer, "datamodule", None)
@@ -377,6 +445,9 @@ class ImageVisualizer(Visualizer):
 
                 # Save the image to the specified filename
                 image.save(filename)
+            
+            #NEW. main modification
+            self._compute_and_save_metrics(item, filename)
 
     def on_predict_batch_end(
         self,
