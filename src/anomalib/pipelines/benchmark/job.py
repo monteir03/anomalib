@@ -107,6 +107,7 @@ class BenchmarkJob(Job):
         datamodule: AnomalibDataModule,
         seed: int,
         flat_cfg: dict,
+        timestamp: str
     ) -> None:
         super().__init__()
         self.accelerator = accelerator
@@ -115,8 +116,10 @@ class BenchmarkJob(Job):
         self.seed = seed
         self.flat_cfg = flat_cfg
         self.mlflow_save_dir = "/mnt/data02/anomalib/mlruns"
-        self.visualize_dir = "/mnt/data02/anomalib/visualize"
-        self.metrics_path = "/mnt/data02/anomalib/item_metrics" #where individual metrics are saved
+        self.pipeline_timestamp = timestamp
+        self.pipeline_path = Path("/mnt/data02/anomalib/pipeline")
+        self.visualize_dir = Path(self.pipeline_path) / self.datamodule.name/ self.model.name/  self.datamodule.category / self.pipeline_timestamp/ "visualizations"
+        self.metrics_path = Path(self.pipeline_path)/ self.datamodule.name/ self.model.name/  self.datamodule.category / self.pipeline_timestamp / "per_item_metrics" / "per_image_metrics.csv"
 
     #@hide_output
     def run(
@@ -162,12 +165,13 @@ class BenchmarkJob(Job):
                 F1Score(fields=["pred_mask", "gt_mask"], prefix="pixel_"),
             ]
             evaluator =  Evaluator(test_metrics=[*image_metrics, *pixel_metrics])
-            #The Anomalib_module model has it's own evaltors by default, so we need to override them.
             self.model.evaluator = evaluator
-            run_name = f"{self.model.name}_{self.datamodule.name}_{self.datamodule.category}"
-            self.model.visualizer = ImageVisualizer(output_dir=Path(self.visualize_dir) / run_name, 
-                                                    metrics_csv = Path(self.metrics_path) / run_name)
 
+            # set Visualizer
+            self.model.visualizer = ImageVisualizer(output_dir= self.visualize_dir,  metrics_csv = self.metrics_path)
+
+            # MLflow run currently have their own unique paths because I m starting MLflow through 
+            run_name = f"{self.pipeline_timestamp}_{self.model.name}_{self.datamodule.name}_{self.datamodule.category}" 
             mlflow_logger = AnomalibMLFlowLogger(
                 experiment_name=self.model.name,
                 run_name=run_name,
@@ -237,7 +241,7 @@ class BenchmarkJob(Job):
             result (pd.DataFrame): DataFrame containing benchmark results to save.
         """
         BenchmarkJob._print_tabular_results(result)
-        file_path = Path("runs") / BenchmarkJob.name / datetime.now().strftime("%Y-%m-%d-%H_%M_%S") / "results.csv"
+        file_path = Path("/mnt/data02/anomalib/pipeline/runs") / BenchmarkJob.name / datetime.now().strftime("%Y-%m-%d-%H_%M_%S") / "results.csv"
         file_path.parent.mkdir(parents=True, exist_ok=True)
         result.to_csv(file_path, index=False)
         logger.info(f"Saved results to {file_path}")

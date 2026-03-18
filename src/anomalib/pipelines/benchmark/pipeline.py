@@ -63,6 +63,7 @@ from anomalib.pipelines.components.base import Pipeline, Runner
 from anomalib.pipelines.components.runners import ParallelRunner, SerialRunner
 
 from .generator import BenchmarkJobGenerator
+from datetime import datetime
 
 
 class Benchmark(Pipeline):
@@ -111,6 +112,7 @@ class Benchmark(Pipeline):
             >>> args = {"accelerator": "cuda"}
             >>> runners = Benchmark._setup_runners(args)
         """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         accelerators = args["accelerator"] if isinstance(args["accelerator"], list) else [args["accelerator"]]
         runners: list[Runner] = []
         for accelerator in accelerators:
@@ -119,7 +121,7 @@ class Benchmark(Pipeline):
                 raise ValueError(msg)
             device_count = torch.cuda.device_count()
             if device_count <= 1 or accelerator == "cpu":
-                runners.append(SerialRunner(BenchmarkJobGenerator(accelerator)))
+                runners.append(SerialRunner(BenchmarkJobGenerator(accelerator = accelerator, timestamp = timestamp)))
             else:
-                runners.append(ParallelRunner(BenchmarkJobGenerator(accelerator), n_jobs=device_count))
+                runners.append(ParallelRunner(BenchmarkJobGenerator(accelerator = accelerator, timestamp = timestamp), n_jobs=device_count))
         return runners

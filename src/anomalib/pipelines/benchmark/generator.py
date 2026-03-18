@@ -56,8 +56,9 @@ class BenchmarkJobGenerator(JobGenerator):
         >>> jobs = list(generator.generate_jobs(args, None))
     """
 
-    def __init__(self, accelerator: str) -> None:
+    def __init__(self, accelerator: str, timestamp: str) -> None:
         self.accelerator = accelerator
+        self.timestamp = timestamp
 
     @property
     def job_class(self) -> type:
@@ -105,4 +106,5 @@ class BenchmarkJobGenerator(JobGenerator):
                 model=get_model(_container["model"]),
                 datamodule=get_datamodule(_container["data"]),
                 flat_cfg=flat_cfg,
+                timestamp = self.timestamp
             )
