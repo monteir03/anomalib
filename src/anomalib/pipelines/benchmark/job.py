@@ -185,7 +185,10 @@ class BenchmarkJob(Job):
                 devices=devices,
                 default_root_dir=temp_dir,
                 logger=mlflow_logger,
+                max_epochs=200,
+                enable_checkpointing=True
             )
+
             fit_start_time = time.time()
             engine.fit(self.model, self.datamodule)
             test_start_time = time.time()
