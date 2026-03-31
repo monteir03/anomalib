@@ -153,21 +153,55 @@ class Fastflow(AnomalibModule):
         self.log("train_loss", loss.item(), on_epoch=True, prog_bar=True, logger=True)
         return {"loss": loss}
 
+    # def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
+    #    """Perform the validation step and return the anomaly map.
+    #
+    #    Args:
+    #        batch (dict[str, str | torch.Tensor]): Input batch
+    #        args: Additional arguments.
+    #        kwargs: Additional keyword arguments.
+    #
+    #    Returns:
+    #        STEP_OUTPUT | None: batch dictionary containing anomaly-maps.
+    #    """
+    #    del args, kwargs  # These variables are not used.
+    #    #hidden_variables, jacobians = self.model(batch.image)
+    #    #loss = self.loss(hidden_variables, jacobians)
+    #    #self.log("val_loss", loss.item(), on_epoch=True, prog_bar=True, logger=True)
+    #    predictions = self.model(batch.image)
+    #    print("DEbug",vars(predictions))
+    #    return batch.update(**predictions._asdict())
+
+
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
-        """Perform the validation step and return the anomaly map.
+        del args, kwargs
 
-        Args:
-            batch (dict[str, str | torch.Tensor]): Input batch
-            args: Additional arguments.
-            kwargs: Additional keyword arguments.
+        # --- 1. calcular val_loss só nas imagens normais ---
+        # gt_label = 0 → normal, gt_label = 1 → anómalo
+        normal_mask = batch.gt_label == 0
 
-        Returns:
-            STEP_OUTPUT | None: batch dictionary containing anomaly-maps.
-        """
-        del args, kwargs  # These variables are not used.
+        if normal_mask.sum() > 0:
+            normal_images = batch.image[normal_mask]
 
+            # força modo treino para obter (z, log_j) em vez de InferenceBatch
+            self.model.train()
+            with torch.no_grad():  # mas SEM gradientes — não estamos a treinar
+                hidden_variables, jacobians = self.model(normal_images)
+
+            val_loss = self.loss(hidden_variables, jacobians)
+            self.log(
+                "val_loss",
+                val_loss.item(),
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
+
+        # --- 2. voltar a eval para gerar o anomaly map normalmente ---
+        self.model.eval()
         predictions = self.model(batch.image)
         return batch.update(**predictions._asdict())
+    
 
     @property
     def trainer_arguments(self) -> dict[str, Any]:

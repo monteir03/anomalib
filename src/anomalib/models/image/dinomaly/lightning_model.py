@@ -267,6 +267,23 @@ class Dinomaly(AnomalibModule):
 
         return {"loss": loss}
 
+    def _compute_validation_loss(self, batch: Batch) -> torch.Tensor | None:
+        normal_mask = batch.gt_label == 0
+        if normal_mask.sum() == 0:
+            return None
+    
+        normal_images = batch.image[normal_mask]
+    
+        self.model.train()
+        with torch.enable_grad():
+            loss = self.model(normal_images, global_step=self.global_step)
+    
+        # limpa gradientes acumulados para não contaminar o próximo training_step
+        self.optimizers().zero_grad()
+    
+        self.model.eval()
+        return loss.detach() # ← remove do grafo após calcular
+
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
         """Validation step for the Dinomaly model.
 
@@ -291,6 +308,11 @@ class Dinomaly(AnomalibModule):
             scores and maps computed from encoder-decoder feature comparisons.
         """
         del args, kwargs  # These variables are not used.
+
+        val_loss = self._compute_validation_loss(batch)
+        if val_loss is not None:
+            self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
+
 
         predictions = self.model(batch.image)
         return batch.update(pred_score=predictions.pred_score, anomaly_map=predictions.anomaly_map)

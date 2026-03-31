@@ -120,7 +120,7 @@ class EfficientAd(AnomalibModule):
 
     def __init__(
         self,
-        imagenet_dir: Path | str = "./datasets/imagenette",
+        imagenet_dir: Path | str = "/mnt/data02/anomalib/EfficientAd/imagenette",
         teacher_out_channels: int = 384,
         model_size: EfficientAdModelSize | str = EfficientAdModelSize.S,
         lr: float = 0.0001,
@@ -430,6 +430,28 @@ class EfficientAd(AnomalibModule):
         map_norm_quantiles = self.map_norm_quantiles(self.trainer.datamodule.val_dataloader())
         self.model.quantiles.update(map_norm_quantiles)
 
+    
+    def _compute_validation_loss(self, batch: Batch) -> torch.Tensor | None:
+        """Compute loss on normal images from the validation batch."""
+        normal_mask = batch.gt_label == 0
+        if normal_mask.sum() == 0:
+            return None
+        normal_images = batch.image[normal_mask]
+        # reuse the imagenet iterator already initialised in on_train_start
+        try:
+            batch_imagenet = next(self.imagenet_iterator)[0].to(self.device)
+        except StopIteration:
+            self.imagenet_iterator = iter(self.imagenet_loader)
+            batch_imagenet = next(self.imagenet_iterator)[0].to(self.device)
+        self.model.train()
+        with torch.no_grad():
+            loss_st, loss_ae, loss_stae = self.model(
+                batch=normal_images,
+                batch_imagenet=batch_imagenet,
+            )
+        self.model.eval()
+        return loss_st + loss_ae + loss_stae
+
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
         """Perform validation step.
 
@@ -444,6 +466,11 @@ class EfficientAd(AnomalibModule):
             STEP_OUTPUT: Batch with added predictions
         """
         del args, kwargs  # These variables are not used.
+
+        val_loss = self._compute_validation_loss(batch)
+        if val_loss is not None:
+            self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
+
 
         predictions = self.model(batch.image)
         return batch.update(**predictions._asdict())

@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from PIL import Image
 import csv #new
-from pprint import pprint
+#from pprint import pprint
 
 # Only import types during type checking to avoid circular imports
 if TYPE_CHECKING:
@@ -416,8 +416,8 @@ class ImageVisualizer(Visualizer):
         first = True
         for item in batch:
             if first:
-                print("#######DEBUG_ITEM########")
-                pprint(dir(item))
+                #print("#######DEBUG_ITEM########")
+                ##pprint(dir(item))
                 first = False
 
             image = visualize_image_item(

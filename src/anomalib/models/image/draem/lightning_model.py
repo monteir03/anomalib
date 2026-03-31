@@ -84,7 +84,7 @@ class Draem(AnomalibModule):
 
     def __init__(
         self,
-        dtd_dir: Path | str = "./datasets/dtd",
+        dtd_dir: Path | str = "/mnt/data02/anomalib/DRAEM",
         enable_sspcab: bool = False,
         sspcab_lambda: float = 0.1,
         beta: float | tuple[float, float] = (0.1, 1.0),
@@ -190,6 +190,30 @@ class Draem(AnomalibModule):
 
         self.log("train_loss", loss.item(), on_epoch=True, prog_bar=True, logger=True)
         return {"loss": loss}
+    
+    def _compute_validation_loss(self, batch: Batch) -> torch.Tensor | None:
+        """Compute loss on normal images from the validation batch."""
+        normal_mask = batch.gt_label == 0
+        if normal_mask.sum() == 0:
+            return None
+
+        normal_images = batch.image[normal_mask]
+
+        self.model.train()
+        with torch.no_grad():
+            # augmenter generates synthetic anomalies — needed for the loss
+            augmented_image, anomaly_mask = self.augmenter(normal_images)
+            reconstruction, prediction = self.model(augmented_image)
+            loss = self.loss(normal_images, reconstruction, anomaly_mask, prediction)
+
+            if self.sspcab:
+                loss += self.sspcab_lambda * self.sspcab_loss(
+                    self.sspcab_activations["input"],
+                    self.sspcab_activations["output"],
+                )
+        self.model.eval()
+
+        return loss
 
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
         """Perform validation step for DRAEM.
@@ -205,6 +229,11 @@ class Draem(AnomalibModule):
             STEP_OUTPUT: Dictionary containing predictions and metadata.
         """
         del args, kwargs  # These variables are not used.
+
+        val_loss = self._compute_validation_loss(batch)
+        if val_loss is not None:
+            self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
+
 
         prediction = self.model(batch.image)
         return batch.update(**prediction._asdict())

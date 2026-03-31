@@ -195,7 +195,24 @@ class Cfa(AnomalibModule):
 
         distance = self.model(batch.image)
         loss = self.loss(distance)
+
+        # adding loss curve log
+        self.log("train_loss", loss.item(), on_epoch=True, prog_bar=True, logger=True)
+        
         return {"loss": loss}
+
+    def _compute_validation_loss(self, batch: Batch) -> torch.Tensor | None:
+        """Calcula a loss nas imagens normais do batch de validação."""
+        normal_mask = batch.gt_label == 0
+        if normal_mask.sum() == 0:
+            return None
+
+        self.model.train()
+        with torch.no_grad():
+            distance = self.model(batch.image[normal_mask])
+        self.model.eval()
+
+        return self.loss(distance)
 
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
         """Perform a validation step.
@@ -209,6 +226,11 @@ class Cfa(AnomalibModule):
             STEP_OUTPUT: Batch object updated with model predictions.
         """
         del args, kwargs  # These variables are not used.
+        
+        # log val Loss. 
+        val_loss = self._compute_validation_loss(batch)
+        if val_loss is not None:
+            self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
 
         predictions = self.model(batch.image)
         return batch.update(**predictions._asdict())

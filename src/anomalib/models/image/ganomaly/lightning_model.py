@@ -250,6 +250,24 @@ class Ganomaly(AnomalibModule):
         self._reset_min_max()
         return super().on_validation_start()
 
+    def _compute_validation_loss(self, batch: Batch) -> torch.Tensor | None:
+        """Compute generator loss on normal images from the validation batch."""
+        normal_mask = batch.gt_label == 0
+        if normal_mask.sum() == 0:
+            return None
+
+        normal_images = batch.image[normal_mask]
+
+        self.model.train()
+        with torch.no_grad():
+            padded, fake, latent_i, latent_o = self.model(normal_images)
+            pred_real, _ = self.model.discriminator(padded)
+            pred_fake, _ = self.model.discriminator(fake)
+            loss = self.generator_loss(latent_i, latent_o, padded, fake, pred_real, pred_fake)
+        self.model.eval()
+
+        return loss
+
     def validation_step(self, batch: Batch, *args, **kwargs) -> Batch:
         """Update min and max scores from the current step.
 
@@ -262,6 +280,10 @@ class Ganomaly(AnomalibModule):
             (STEP_OUTPUT): Output predictions.
         """
         del args, kwargs  # Unused arguments.
+
+        val_loss = self._compute_validation_loss(batch)
+        if val_loss is not None:
+            self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
 
         predictions = self.model(batch.image)
         self.max_scores = max(self.max_scores, torch.max(predictions.pred_score))

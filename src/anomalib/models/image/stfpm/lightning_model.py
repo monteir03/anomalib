@@ -135,6 +135,20 @@ class Stfpm(AnomalibModule):
         self.log("train_loss", loss.item(), on_epoch=True, prog_bar=True, logger=True)
         return {"loss": loss}
 
+    def _compute_validation_loss(self, batch: Batch) -> torch.Tensor | None:
+        """Compute loss on normal images from the validation batch."""
+        normal_mask = batch.gt_label == 0
+        if normal_mask.sum() == 0:
+            return None
+        normal_images = batch.image[normal_mask]
+        self.model.train()
+        with torch.no_grad():
+            teacher_features, student_features = self.model.forward(normal_images)
+            loss = self.loss(teacher_features, student_features)
+        self.model.eval()
+
+        return loss
+
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
         """Perform a validation step of STFPM.
 
@@ -151,6 +165,10 @@ class Stfpm(AnomalibModule):
                 masks for evaluation.
         """
         del args, kwargs  # These variables are not used.
+        
+        val_loss = self._compute_validation_loss(batch)
+        if val_loss is not None:
+            self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
 
         predictions = self.model(batch.image)
         return batch.update(**predictions._asdict())

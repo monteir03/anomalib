@@ -40,6 +40,8 @@ from typing import Any
 
 import pandas as pd
 from lightning import seed_everything
+from lightning.pytorch.callbacks import EarlyStopping
+from anomalib.callbacks import ModelCheckpoint
 from rich.console import Console
 from rich.table import Table
 
@@ -48,6 +50,7 @@ from anomalib.engine import Engine
 from anomalib.models import AnomalibModule
 from anomalib.pipelines.components import Job
 from anomalib.utils.logging import hide_output
+from pprint import pprint
 
 ####################
 ### Personalized ###
@@ -126,33 +129,32 @@ class BenchmarkJob(Job):
         self,
         task_id: int | None = None,
     ) -> dict[str, Any]:
-        """Run the benchmark job.
-
-        This method executes the full benchmarking pipeline including model
-        training and testing. It measures execution time for different stages and
-        collects performance metrics.
-
-        Args:
-            task_id (int | None, optional): ID of the task when running in
-                distributed mode. When provided, the job will use the specified
-                device. Defaults to ``None``.
-
-        Returns:
-            dict[str, Any]: Dictionary containing benchmark results including:
-                - Timing information (job, fit and test duration)
-                - Model configuration
-                - Performance metrics from testing
-        """
         job_start_time = time.time()
         devices: str | list[int] = "auto"
         if task_id is not None:
             devices = [task_id]
             logger.info(f"Running job {self.model.__class__.__name__} with device {task_id}")
-        with TemporaryDirectory() as temp_dir:
+
+        fit_start_time = time.time()
+
+        with TemporaryDirectory(dir="/mnt/data02/anomalib/tmp") as temp_dir:
             seed_everything(self.seed)
-            ####################
-            ### Personalized ###
-            ####################
+
+            # models without pixel-level anomaly map
+            NO_PIXEL_METRICS = {"Ganomaly"}
+            has_pixel = self.model.name not in NO_PIXEL_METRICS
+
+            # models that require train_batch_size=1
+            BATCH_SIZE_ONE = {"EfficientAd"}
+            if self.model.name in BATCH_SIZE_ONE:
+                self.datamodule.train_batch_size = 1
+
+            # models with no training loop — skip fit entirely
+            NO_TRAINING = {"WinClip"}
+
+            # models that need fit but have no val_loss / early stopping
+            NO_EARLY_STOPPING = {"Patchcore"}
+
             image_metrics = [
                 AUROC(fields=["pred_score", "gt_label"], prefix="image_"),
                 AUPR(fields=["pred_score", "gt_label"], prefix="image_"),
@@ -164,37 +166,95 @@ class BenchmarkJob(Job):
                 AUPRO(fields=["anomaly_map", "gt_mask"], prefix="pixel_"),
                 F1Score(fields=["pred_mask", "gt_mask"], prefix="pixel_"),
             ]
-            evaluator =  Evaluator(test_metrics=[*image_metrics, *pixel_metrics])
+
+            evaluator = Evaluator(
+                test_metrics=[*image_metrics, *(pixel_metrics if has_pixel else [])],
+                val_metrics=[
+                    AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_")
+                    if has_pixel
+                    else AUROC(fields=["pred_score", "gt_label"], prefix="image_")
+                ],
+            )
             self.model.evaluator = evaluator
 
-            # set Visualizer
-            self.model.visualizer = ImageVisualizer(output_dir= self.visualize_dir,  metrics_csv = self.metrics_path)
+            self.model.visualizer = ImageVisualizer(
+                output_dir=self.visualize_dir,
+                metrics_csv=self.metrics_path,
+            )
 
-            # MLflow run currently have their own unique paths because I m starting MLflow through 
-            run_name = f"{self.pipeline_timestamp}_{self.model.name}_{self.datamodule.name}_{self.datamodule.category}" 
+            run_name = f"{self.pipeline_timestamp}_{self.model.name}_{self.datamodule.name}_{self.datamodule.category}"
             mlflow_logger = AnomalibMLFlowLogger(
                 experiment_name=self.model.name,
                 run_name=run_name,
                 save_dir=self.mlflow_save_dir,
             )
-            ####################
-            ### Personalized ###
-            ####################
-            engine = Engine(
-                accelerator=self.accelerator,
-                devices=devices,
-                default_root_dir=temp_dir,
-                logger=mlflow_logger,
-                max_epochs=200,
-                enable_checkpointing=True
+
+            checkpoint_dir = f"/mnt/data02/anomalib/checkpoints/{self.model.name}/{self.datamodule.category}/{self.pipeline_timestamp}"
+
+            early_stopping = EarlyStopping(
+                monitor="val_loss",
+                mode="min",
+                patience=12,
+                verbose=True,
             )
 
-            fit_start_time = time.time()
-            engine.fit(self.model, self.datamodule)
-            test_start_time = time.time()
-            test_results = engine.test(self.model, self.datamodule)
+            checkpoint = ModelCheckpoint(
+                dirpath=checkpoint_dir,
+                monitor="val_loss",
+                mode="min",
+                save_top_k=1,
+                filename="best",
+            )
 
-    
+            checkpoint_no_monitor = ModelCheckpoint(
+                dirpath=checkpoint_dir,
+                save_top_k=1,
+                filename="best",
+            )
+
+            if self.model.name in NO_TRAINING:
+                # zero-shot — no training loop, go straight to test
+                engine = Engine(
+                    accelerator=self.accelerator,
+                    devices=devices,
+                    default_root_dir=temp_dir,
+                    logger=mlflow_logger,
+                    callbacks=[],
+                    enable_checkpointing=True,
+                    max_epochs=1,
+                )
+                test_start_time = time.time()
+                test_results = engine.test(self.model, self.datamodule)
+
+            elif self.model.name in NO_EARLY_STOPPING:
+                # needs fit to build memory bank but has no val_loss
+                engine = Engine(
+                    accelerator=self.accelerator,
+                    devices=devices,
+                    default_root_dir=temp_dir,
+                    logger=mlflow_logger,
+                    callbacks=[checkpoint_no_monitor],
+                    enable_checkpointing=True,
+                    max_epochs=200,
+                )
+                engine.fit(self.model, self.datamodule)
+                test_start_time = time.time()
+                test_results = engine.test(self.model, self.datamodule)
+
+            else:
+                # standard training loop with early stopping + best checkpoint
+                engine = Engine(
+                    accelerator=self.accelerator,
+                    devices=devices,
+                    default_root_dir=temp_dir,
+                    logger=mlflow_logger,
+                    callbacks=[early_stopping, checkpoint],
+                    enable_checkpointing=True,
+                    max_epochs=200,
+                )
+                engine.fit(self.model, self.datamodule)
+                test_start_time = time.time()
+                test_results = engine.test(self.model, self.datamodule)
 
         job_end_time = time.time()
         durations = {
@@ -202,8 +262,6 @@ class BenchmarkJob(Job):
             "fit_duration": test_start_time - fit_start_time,
             "test_duration": job_end_time - test_start_time,
         }
-        # TODO(ashwinvaidya17): Restore throughput
-        # https://github.com/open-edge-platform/anomalib/issues/2054
         output = {
             "accelerator": self.accelerator,
             **durations,
@@ -212,6 +270,7 @@ class BenchmarkJob(Job):
         }
         logger.info(f"Completed with result {output}")
         return output
+
 
     @staticmethod
     def collect(results: list[dict[str, Any]]) -> pd.DataFrame:
