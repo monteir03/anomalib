@@ -215,95 +215,115 @@ class Cflow(AnomalibModule):
         return {"loss": avg_loss}
     
 
-    def _compute_validation_loss(self, batch: Batch) -> torch.Tensor | None:
-        normal_mask = batch.gt_label == 0
-        if normal_mask.sum() == 0:
-            return None
-    
-        normal_images = batch.image[normal_mask]  # ← só normais
-    
+    def _compute_loss(
+        self,
+        batch: Batch,
+        per_image: bool = False,
+        ) -> torch.Tensor | None:
+
+        """Compute CFlow normalizing flow loss. 
+            Args:
+                batch: Input batch.
+                per_image: If True, returns loss per image [B] using all images (test).
+                       If False, returns scalar loss on normal images only (validation).
+        """
+        if per_image:
+            images = batch.image  # all images — [B, C, H, W]
+        else:
+            normal_mask = batch.gt_label == 0
+            if normal_mask.sum() == 0:
+                return None
+            images = batch.image[normal_mask]
+
         self.model.train()
         with torch.no_grad():
-            activation = self.model.encoder(normal_images)  # ← só normais
-            avg_loss = torch.zeros([1], dtype=torch.float64).to(normal_images.device)
-            num_layers = len(self.model.pool_layers)
-    
-            for layer_idx, layer in enumerate(self.model.pool_layers):
-                encoder_activations = activation[layer].detach()
-                batch_size, dim_feature_vector, im_height, im_width = encoder_activations.size()
-                image_size = im_height * im_width
-                embedding_length = batch_size * image_size
-    
-                pos_encoding = einops.repeat(
-                    positional_encoding_2d(self.model.condition_vector, im_height, im_width).unsqueeze(0),
-                    "b c h w-> (tile b) c h w",
-                    tile=batch_size,
-                ).to(normal_images.device)
-                c_r = einops.rearrange(pos_encoding, "b c h w -> (b h w) c")
-                e_r = einops.rearrange(encoder_activations, "b c h w -> (b h w) c")
-                perm = torch.randperm(embedding_length)
-                decoder = self.model.decoders[layer_idx].to(normal_images.device)
-    
-                fiber_batches = embedding_length // self.model.fiber_batch_size
-                if fiber_batches <= 0:
-                    self.model.eval()
-                    return None
-    
-                layer_loss = torch.zeros([1], dtype=torch.float64).to(normal_images.device)
-                for batch_num in range(fiber_batches):
-                    if batch_num < (fiber_batches - 1):
-                        idx = torch.arange(
-                            batch_num * self.model.fiber_batch_size,
-                            (batch_num + 1) * self.model.fiber_batch_size,
-                        )
-                    else:
-                        idx = torch.arange(batch_num * self.model.fiber_batch_size, embedding_length)
-    
-                    c_p = c_r[perm[idx]]
-                    e_p = e_r[perm[idx]]
-                    p_u, log_jac_det = decoder(e_p, [c_p])
-                    decoder_log_prob = get_logp(dim_feature_vector, p_u, log_jac_det)
-                    log_prob = decoder_log_prob / dim_feature_vector
-                    loss = -F.logsigmoid(log_prob)
-                    layer_loss += loss.mean()
-    
-                avg_loss += layer_loss / fiber_batches
-    
-            avg_loss = avg_loss / num_layers
-    
-        self.model.eval()
-        return avg_loss
+
+            if per_image:
+                # process each image individually to get per-image loss
+                losses = []
+                for i in range(images.shape[0]):
+                    single_image = images[i].unsqueeze(0)  # [1, C, H, W]
+                    img_loss = self._compute_cflow_loss_scalar(single_image)
+                    losses.append(img_loss)
+                self.model.eval()
+                return torch.stack(losses)  # [B]
+
+            else:
+                scalar = self._compute_cflow_loss_scalar(images)
+                self.model.eval()
+                return scalar
+
+
+    def _compute_cflow_loss_scalar(self, images: torch.Tensor) -> torch.Tensor:
+        """Run the fiber batch loop on given images and return a normalised scalar."""
+        activation = self.model.encoder(images)
+        avg_loss = torch.zeros([1], dtype=torch.float64).to(images.device)
+        num_layers = len(self.model.pool_layers)
+
+        for layer_idx, layer in enumerate(self.model.pool_layers):
+            encoder_activations = activation[layer].detach()
+            batch_size, dim_feature_vector, im_height, im_width = encoder_activations.size()
+            image_size = im_height * im_width
+            embedding_length = batch_size * image_size
+
+            pos_encoding = einops.repeat(
+                positional_encoding_2d(self.model.condition_vector, im_height, im_width).unsqueeze(0),
+                "b c h w-> (tile b) c h w",
+                tile=batch_size,
+            ).to(images.device)
+            c_r = einops.rearrange(pos_encoding, "b c h w -> (b h w) c")
+            e_r = einops.rearrange(encoder_activations, "b c h w -> (b h w) c")
+            perm = torch.randperm(embedding_length)
+            decoder = self.model.decoders[layer_idx].to(images.device)
+
+            fiber_batches = embedding_length // self.model.fiber_batch_size
+            if fiber_batches <= 0:
+                return torch.tensor(0.0).to(images.device)
+
+            layer_loss = torch.zeros([1], dtype=torch.float64).to(images.device)
+            for batch_num in range(fiber_batches):
+                if batch_num < (fiber_batches - 1):
+                    idx = torch.arange(
+                        batch_num * self.model.fiber_batch_size,
+                        (batch_num + 1) * self.model.fiber_batch_size,
+                    )
+                else:
+                    idx = torch.arange(batch_num * self.model.fiber_batch_size, embedding_length)
+
+                c_p = c_r[perm[idx]]
+                e_p = e_r[perm[idx]]
+                p_u, log_jac_det = decoder(e_p, [c_p])
+                decoder_log_prob = get_logp(dim_feature_vector, p_u, log_jac_det)
+                log_prob = decoder_log_prob / dim_feature_vector
+                loss = -F.logsigmoid(log_prob)
+                layer_loss += loss.mean()
+
+            avg_loss += layer_loss / fiber_batches
+        return (avg_loss / num_layers).float()
+
+
 
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
         del args, kwargs
 
-        val_loss = self._compute_validation_loss(batch)
+        val_loss = self._compute_loss(batch, per_image=False)
         if val_loss is not None:
             self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
 
         predictions = self.model(batch.image)
         return batch.update(**predictions._asdict())
 
-    #def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
-    #    """Perform a validation step of the CFLOW model.
-#
-    #    The validation process:
-    #    1. Extracts features using the encoder
-    #    2. Computes anomaly maps using the trained decoders
-    #    3. Updates the batch with predictions
-#
-    #    Args:
-    #        batch (Batch): Input batch containing images
-    #        *args: Additional arguments (unused)
-    #        **kwargs: Additional keyword arguments (unused)
-#
-    #    Returns:
-    #        STEP_OUTPUT: Batch updated with model predictions
-    #    """
-    #    del args, kwargs  # These variables are not used.
-#
-    #    predictions = self.model(batch.image)
-    #    return batch.update(**predictions._asdict())
+
+
+    def test_step(self, batch: Batch, batch_idx: int, *args, **kwargs) -> STEP_OUTPUT:
+        del args, kwargs, batch_idx
+
+        self._test_loss_cache = self._compute_loss(batch, per_image=True)
+
+        predictions = self.model(batch.image)
+        return batch.update(**predictions._asdict())
+
+    
 
     @property
     def trainer_arguments(self) -> dict[str, Any]:

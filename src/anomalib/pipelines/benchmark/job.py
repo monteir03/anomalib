@@ -30,7 +30,7 @@ The job executes model training and evaluation, collecting metrics like accuracy
 F1-score, and inference time. Results are returned in a standardized format for
 comparison across different model-dataset combinations.
 """
-
+import os
 import logging
 import time
 from datetime import datetime
@@ -112,17 +112,34 @@ class BenchmarkJob(Job):
         flat_cfg: dict,
         timestamp: str
     ) -> None:
-        super().__init__()
+        self.user = os.getenv("HOST_USER") or os.getenv("USER")
+        self.pipeline_timestamp = timestamp
         self.accelerator = accelerator
         self.model = model
         self.datamodule = datamodule
         self.seed = seed
+        self.bucket_path = Path("/mnt/data02/") / "anomalib"  #  /mnt/data02/    /mnt/ob2/     / self.pipeline_timestamp / self.user / "anomalib" 
         self.flat_cfg = flat_cfg
-        self.mlflow_save_dir = "/mnt/data02/anomalib/mlruns"
-        self.pipeline_timestamp = timestamp
-        self.pipeline_path = Path("/mnt/data02/anomalib/pipeline")
-        self.visualize_dir = Path(self.pipeline_path) / self.datamodule.name/ self.model.name/  self.datamodule.category / self.pipeline_timestamp/ "visualizations"
-        self.metrics_path = Path(self.pipeline_path)/ self.datamodule.name/ self.model.name/  self.datamodule.category / self.pipeline_timestamp / "per_item_metrics" / "per_image_metrics.csv"
+        self.mlflow_save_dir = self.bucket_path / "mlruns"
+        self.pipeline_path = self.bucket_path / "pipeline"
+        self.visualize_dir = (
+            self.pipeline_path
+            / self.datamodule.name
+            / self.model.name
+            / self.datamodule.category
+            / self.pipeline_timestamp
+            / "visualizations"
+        )
+        self.checkpoint_dir = self.bucket_path / "checkpoints"  / self.model.name / self.datamodule.category / self.pipeline_timestamp
+        self.metrics_path = (
+            self.pipeline_path
+            / self.datamodule.name
+            / self.model.name
+            / self.datamodule.category
+            / self.pipeline_timestamp
+            / "per_item_metrics"
+            / "per_image_metrics.csv"
+        )
 
     #@hide_output
     def run(
@@ -189,7 +206,6 @@ class BenchmarkJob(Job):
                 save_dir=self.mlflow_save_dir,
             )
 
-            checkpoint_dir = f"/mnt/data02/anomalib/checkpoints/{self.model.name}/{self.datamodule.category}/{self.pipeline_timestamp}"
 
             early_stopping = EarlyStopping(
                 monitor="val_loss",
@@ -199,7 +215,7 @@ class BenchmarkJob(Job):
             )
 
             checkpoint = ModelCheckpoint(
-                dirpath=checkpoint_dir,
+                dirpath=self.checkpoint_dir,
                 monitor="val_loss",
                 mode="min",
                 save_top_k=1,
@@ -207,7 +223,7 @@ class BenchmarkJob(Job):
             )
 
             checkpoint_no_monitor = ModelCheckpoint(
-                dirpath=checkpoint_dir,
+                dirpath=self.checkpoint_dir,
                 save_top_k=1,
                 filename="best",
             )

@@ -209,26 +209,30 @@ class ImageVisualizer(Visualizer):
                     "pred_label",
                     "pixel_auroc",
                     "pixel_aupr",
+                    "loss",
                 ])
        
     
-    #New 
-    def _compute_and_save_metrics(self, item, vis_filename: Path | None):
-        from anomalib.data import ImageItem, NumpyImageItem
+    # New function to save per image metrics to CSV. Called from on_test_batch_end after visualization and saving.
+    def _compute_and_save_metrics(self, item, vis_filename: Path | None, loss: float | None = None):
 
+        """
+        this image receives the image item with metrics associated
+        the visualization filename resulted
+        loss which is a metric
+        """
         if not (hasattr(item, "gt_mask") and item.gt_mask is not None
                 and hasattr(item, "anomaly_map") and item.anomaly_map is not None):
             return
 
         results = {}
-
         for metric_cls, key in [
             (AUROC, "pixel_auroc"),
             (AUPR, "pixel_aupr"),
         ]:
             try:
                 m = metric_cls(fields=["anomaly_map", "gt_mask"])
-                m.update(item)  # pass the full item, not flattened tensors
+                m.update(item)
                 results[key] = float(m.compute())
                 m.reset()
             except Exception as e:
@@ -245,7 +249,9 @@ class ImageVisualizer(Visualizer):
                     str(item.pred_label) if item.pred_label is not None else "",
                     results.get("pixel_auroc", ""),
                     results.get("pixel_aupr", ""),
+                    loss if loss is not None else "",  # ← new column
                 ])
+
 
     def visualize(
         self,
@@ -408,17 +414,22 @@ class ImageVisualizer(Visualizer):
         dataloader_idx: int = 0,
     ) -> None:
         """Called when the test batch ends."""
-        del pl_module, outputs, batch_idx, dataloader_idx  # Unused arguments.
+        del outputs, batch_idx, dataloader_idx #pl_module # Unused arguments.
 
         if self.output_dir is None:
             self.output_dir = Path(trainer.default_root_dir) / "images"
 
-        first = True
-        for item in batch:
-            if first:
+        # read loss cache from model — None if model doesn't implement test_step
+        loss_per_image = getattr(pl_module, "_test_loss_cache", None)
+
+        #first = True
+
+        #here we iterating over batch to compute and save metrics per image.
+        for i,item in enumerate(batch):
+            #if first:
                 #print("#######DEBUG_ITEM########")
                 ##pprint(dir(item))
-                first = False
+                #first = False
 
             image = visualize_image_item(
                 item,
@@ -447,7 +458,9 @@ class ImageVisualizer(Visualizer):
                 image.save(filename)
             
             #NEW. main modification
-            self._compute_and_save_metrics(item, filename)
+            # get loss for this specific image — None if model doesn't support it
+            item_loss = loss_per_image[i].item() if loss_per_image is not None else None
+            self._compute_and_save_metrics(item, filename, loss=item_loss)
 
     def on_predict_batch_end(
         self,

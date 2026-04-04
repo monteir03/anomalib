@@ -191,50 +191,70 @@ class Draem(AnomalibModule):
         self.log("train_loss", loss.item(), on_epoch=True, prog_bar=True, logger=True)
         return {"loss": loss}
     
-    def _compute_validation_loss(self, batch: Batch) -> torch.Tensor | None:
-        """Compute loss on normal images from the validation batch."""
-        normal_mask = batch.gt_label == 0
-        if normal_mask.sum() == 0:
-            return None
-
-        normal_images = batch.image[normal_mask]
-
+    def _compute_loss(
+        self,
+        batch: Batch,
+        per_image: bool = False,
+    ) -> torch.Tensor | None:
+        """Compute DRAEM reconstruction + discriminative loss.
+    
+        Args:
+            batch: Input batch.
+            per_image: If True, returns loss per image [B] using all images (test).
+                       If False, returns scalar loss on normal images only (validation).
+        """
+        if per_image:
+            images = batch.image  # all images
+        else:
+            normal_mask = batch.gt_label == 0
+            if normal_mask.sum() == 0:
+                return None
+            images = batch.image[normal_mask]
+    
         self.model.train()
         with torch.no_grad():
-            # augmenter generates synthetic anomalies — needed for the loss
-            augmented_image, anomaly_mask = self.augmenter(normal_images)
-            reconstruction, prediction = self.model(augmented_image)
-            loss = self.loss(normal_images, reconstruction, anomaly_mask, prediction)
-
-            if self.sspcab:
-                loss += self.sspcab_lambda * self.sspcab_loss(
-                    self.sspcab_activations["input"],
-                    self.sspcab_activations["output"],
-                )
-        self.model.eval()
-
-        return loss
-
+            if per_image:
+                losses = []
+                for i in range(images.shape[0]):
+                    single_image = images[i].unsqueeze(0)  # [1, C, H, W]
+                    augmented_image, anomaly_mask = self.augmenter(single_image)
+                    reconstruction, prediction = self.model(augmented_image)
+                    loss = self.loss(single_image, reconstruction, anomaly_mask, prediction)
+                    if self.sspcab:
+                        loss += self.sspcab_lambda * self.sspcab_loss(
+                            self.sspcab_activations["input"],
+                            self.sspcab_activations["output"],
+                        )
+                    losses.append(loss)
+                self.model.eval()
+                return torch.stack(losses)  # [B]
+            else:
+                augmented_image, anomaly_mask = self.augmenter(images)
+                reconstruction, prediction = self.model(augmented_image)
+                loss = self.loss(images, reconstruction, anomaly_mask, prediction)
+                if self.sspcab:
+                    loss += self.sspcab_lambda * self.sspcab_loss(
+                        self.sspcab_activations["input"],
+                        self.sspcab_activations["output"],
+                    )
+                self.model.eval()
+                return loss  # scalar
+    
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
-        """Perform validation step for DRAEM.
-
-        Uses softmax predictions of the anomalous class as anomaly maps.
-
-        Args:
-            batch (Batch): Input batch containing images and metadata.
-            args: Additional positional arguments (unused).
-            kwargs: Additional keyword arguments (unused).
-
-        Returns:
-            STEP_OUTPUT: Dictionary containing predictions and metadata.
-        """
-        del args, kwargs  # These variables are not used.
-
-        val_loss = self._compute_validation_loss(batch)
+        del args, kwargs
+    
+        val_loss = self._compute_loss(batch, per_image=False)
         if val_loss is not None:
             self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
-
-
+    
+        prediction = self.model(batch.image)
+        return batch.update(**prediction._asdict())
+    
+    def test_step(self, batch: Batch, batch_idx: int, *args, **kwargs) -> STEP_OUTPUT:
+        del args, kwargs, batch_idx
+    
+        self._test_loss_cache = self._compute_loss(batch, per_image=True)
+    
         prediction = self.model(batch.image)
         return batch.update(**prediction._asdict())
 

@@ -430,47 +430,71 @@ class EfficientAd(AnomalibModule):
         map_norm_quantiles = self.map_norm_quantiles(self.trainer.datamodule.val_dataloader())
         self.model.quantiles.update(map_norm_quantiles)
 
-    
-    def _compute_validation_loss(self, batch: Batch) -> torch.Tensor | None:
-        """Compute loss on normal images from the validation batch."""
-        normal_mask = batch.gt_label == 0
-        if normal_mask.sum() == 0:
-            return None
-        normal_images = batch.image[normal_mask]
-        # reuse the imagenet iterator already initialised in on_train_start
-        try:
-            batch_imagenet = next(self.imagenet_iterator)[0].to(self.device)
-        except StopIteration:
-            self.imagenet_iterator = iter(self.imagenet_loader)
-            batch_imagenet = next(self.imagenet_iterator)[0].to(self.device)
-        self.model.train()
-        with torch.no_grad():
-            loss_st, loss_ae, loss_stae = self.model(
-                batch=normal_images,
-                batch_imagenet=batch_imagenet,
-            )
-        self.model.eval()
-        return loss_st + loss_ae + loss_stae
-
-    def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
-        """Perform validation step.
-
-        Generates anomaly maps for the input batch.
+    def _compute_loss(
+        self,
+        batch: Batch,
+        per_image: bool = False,
+    ) -> torch.Tensor | None:
+        """Compute EfficientAD student-teacher + autoencoder loss.
 
         Args:
-            batch (Batch): Input batch
-            *args: Additional arguments (unused)
-            **kwargs: Additional keyword arguments (unused)
-
-        Returns:
-            STEP_OUTPUT: Batch with added predictions
+            batch: Input batch.
+            per_image: If True, returns loss per image [B] using all images (test).
+                       If False, returns scalar loss on normal images only (validation).
         """
-        del args, kwargs  # These variables are not used.
+        if per_image:
+            images = batch.image  # all images
+        else:
+            normal_mask = batch.gt_label == 0
+            if normal_mask.sum() == 0:
+                return None
+            images = batch.image[normal_mask]
 
-        val_loss = self._compute_validation_loss(batch)
+        self.model.train()
+        with torch.no_grad():
+            if per_image:
+                losses = []
+                for i in range(images.shape[0]):
+                    single_image = images[i].unsqueeze(0)  # [1, C, H, W]
+                    try:
+                        batch_imagenet = next(self.imagenet_iterator)[0].to(self.device)
+                    except StopIteration:
+                        self.imagenet_iterator = iter(self.imagenet_loader)
+                        batch_imagenet = next(self.imagenet_iterator)[0].to(self.device)
+                    loss_st, loss_ae, loss_stae = self.model(
+                        batch=single_image,
+                        batch_imagenet=batch_imagenet,
+                    )
+                    losses.append(loss_st + loss_ae + loss_stae)
+                self.model.eval()
+                return torch.stack(losses)  # [B]
+            else:
+                try:
+                    batch_imagenet = next(self.imagenet_iterator)[0].to(self.device)
+                except StopIteration:
+                    self.imagenet_iterator = iter(self.imagenet_loader)
+                    batch_imagenet = next(self.imagenet_iterator)[0].to(self.device)
+                loss_st, loss_ae, loss_stae = self.model(
+                    batch=images,
+                    batch_imagenet=batch_imagenet,
+                )
+                self.model.eval()
+                return loss_st + loss_ae + loss_stae  # scalar
+
+    def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
+        del args, kwargs
+
+        val_loss = self._compute_loss(batch, per_image=False)
         if val_loss is not None:
             self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
 
+        predictions = self.model(batch.image)
+        return batch.update(**predictions._asdict())
+
+    def test_step(self, batch: Batch, batch_idx: int, *args, **kwargs) -> STEP_OUTPUT:
+        del args, kwargs, batch_idx
+
+        self._test_loss_cache = self._compute_loss(batch, per_image=True)
 
         predictions = self.model(batch.image)
         return batch.update(**predictions._asdict())

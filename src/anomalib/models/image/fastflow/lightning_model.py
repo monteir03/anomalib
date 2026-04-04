@@ -172,36 +172,61 @@ class Fastflow(AnomalibModule):
     #    print("DEbug",vars(predictions))
     #    return batch.update(**predictions._asdict())
 
+    def _compute_loss(
+        self,
+        batch: Batch,
+        per_image: bool = False,
+    ) ->     torch.Tensor | None:
+        """Compute FastFlow loss.
+
+        Args:
+            batch: Input batch.
+            per_image: If True, returns loss per image [B] using all images (test).
+                       If False, returns scalar loss on normal images only (validation).
+        """
+        if per_image:
+            images = batch.image  # all images
+        else:
+            normal_mask = batch.gt_label == 0
+            if normal_mask.sum() == 0:
+                return None
+            images = batch.image[normal_mask]
+
+        self.model.train()
+        with torch.no_grad():
+            hidden_variables, jacobians = self.model(images)
+        self.model.eval()
+
+        loss_per_image = 0
+        for z, log_j in zip(hidden_variables, jacobians):
+            log_prob = -0.5 * (z ** 2).sum(dim=(1, 2, 3))
+            loss_per_image += -(log_prob + log_j)
+
+        if per_image:
+            return loss_per_image  # [B]
+        else:
+            return loss_per_image.mean()  # scalar
 
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
         del args, kwargs
-
-        # --- 1. calcular val_loss só nas imagens normais ---
-        # gt_label = 0 → normal, gt_label = 1 → anómalo
-        normal_mask = batch.gt_label == 0
-
-        if normal_mask.sum() > 0:
-            normal_images = batch.image[normal_mask]
-
-            # força modo treino para obter (z, log_j) em vez de InferenceBatch
-            self.model.train()
-            with torch.no_grad():  # mas SEM gradientes — não estamos a treinar
-                hidden_variables, jacobians = self.model(normal_images)
-
-            val_loss = self.loss(hidden_variables, jacobians)
-            self.log(
-                "val_loss",
-                val_loss.item(),
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-            )
-
-        # --- 2. voltar a eval para gerar o anomaly map normalmente ---
+    
+        val_loss = self._compute_loss(batch, per_image=False)
+        if val_loss is not None:
+            self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
+    
         self.model.eval()
         predictions = self.model(batch.image)
         return batch.update(**predictions._asdict())
     
+    def test_step(self, batch: Batch, batch_idx: int, *args, **kwargs) -> STEP_OUTPUT:
+        del args, kwargs, batch_idx
+    
+        self._test_loss_cache = self._compute_loss(batch, per_image=True)
+    
+        self.model.eval()
+        predictions = self.model(batch.image)
+        return batch.update(**predictions._asdict())
+
 
     @property
     def trainer_arguments(self) -> dict[str, Any]:

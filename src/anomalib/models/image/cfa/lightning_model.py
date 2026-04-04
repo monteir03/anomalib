@@ -201,36 +201,62 @@ class Cfa(AnomalibModule):
         
         return {"loss": loss}
 
-    def _compute_validation_loss(self, batch: Batch) -> torch.Tensor | None:
-        """Calcula a loss nas imagens normais do batch de validação."""
-        normal_mask = batch.gt_label == 0
-        if normal_mask.sum() == 0:
-            return None
+    def _compute_loss(
+        self,
+        batch: Batch,
+        per_image: bool = False,
+    ) -> torch.Tensor | None:
+        """Compute CFA hypersphere loss.
+
+        Args:
+            batch: Input batch.
+            per_image: If True, returns loss per image [B] using all images (test).
+                       If False, returns scalar loss on normal images only (validation).
+        """
+        if per_image:
+            images = batch.image
+        else:
+            normal_mask = batch.gt_label == 0
+            if normal_mask.sum() == 0:
+                return None
+            images = batch.image[normal_mask]
 
         self.model.train()
         with torch.no_grad():
-            distance = self.model(batch.image[normal_mask])
+            distance = self.model(images)  # [B, num_pixels, 1]
         self.model.eval()
 
-        return self.loss(distance)
+        if per_image:
+            # replicate CfaLoss logic but keep per-image — don't call torch.mean across batch
+            num_neighbors = self.loss.num_nearest_neighbors + self.loss.num_hard_negative_features
+            distance = distance.topk(num_neighbors, largest=False).values
+
+            score_att = distance[:, :, :self.loss.num_nearest_neighbors] - (self.loss.radius ** 2).to(distance.device)
+            l_att = torch.max(torch.zeros_like(score_att), score_att).mean(dim=(1, 2))  # [B]
+
+            score_rep = (self.loss.radius ** 2).to(distance.device) - distance[:, :, self.loss.num_hard_negative_features:]
+            l_rep = torch.max(torch.zeros_like(score_rep), score_rep - 0.1).mean(dim=(1, 2))  # [B]
+
+            return (l_att + l_rep) * 1000  # [B]
+        else:
+            return self.loss(distance)  # scalar
+
 
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
-        """Perform a validation step.
+        del args, kwargs
 
-        Args:
-            batch (Batch): Input batch containing images and metadata.
-            *args: Additional positional arguments (unused).
-            **kwargs: Additional keyword arguments (unused).
-
-        Returns:
-            STEP_OUTPUT: Batch object updated with model predictions.
-        """
-        del args, kwargs  # These variables are not used.
-        
-        # log val Loss. 
-        val_loss = self._compute_validation_loss(batch)
+        val_loss = self._compute_loss(batch, per_image=False)
         if val_loss is not None:
             self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
+
+        predictions = self.model(batch.image)
+        return batch.update(**predictions._asdict())
+
+
+    def test_step(self, batch: Batch, batch_idx: int, *args, **kwargs) -> STEP_OUTPUT:
+        del args, kwargs, batch_idx
+
+        self._test_loss_cache = self._compute_loss(batch, per_image=True)
 
         predictions = self.model(batch.image)
         return batch.update(**predictions._asdict())

@@ -267,53 +267,62 @@ class Dinomaly(AnomalibModule):
 
         return {"loss": loss}
 
-    def _compute_validation_loss(self, batch: Batch) -> torch.Tensor | None:
-        normal_mask = batch.gt_label == 0
-        if normal_mask.sum() == 0:
-            return None
+    def _compute_loss(
+        self,
+        batch: Batch,
+        per_image: bool = False,
+    ) -> torch.Tensor | None:
+        """Compute Dinomaly reconstruction loss.
     
-        normal_images = batch.image[normal_mask]
+        Args:
+            batch: Input batch.
+            per_image: If True, returns loss per image [B] using all images (test).
+                       If False, returns scalar loss on normal images only (validation).
+        """
+        if per_image:
+            images = batch.image  # all images
+        else:
+            normal_mask = batch.gt_label == 0
+            if normal_mask.sum() == 0:
+                return None
+            images = batch.image[normal_mask]
     
         self.model.train()
-        with torch.enable_grad():
-            loss = self.model(normal_images, global_step=self.global_step)
     
-        # limpa gradientes acumulados para não contaminar o próximo training_step
-        self.optimizers().zero_grad()
+        if per_image:
+            # process each image individually — model returns a scalar per call
+            losses = []
+            for i in range(images.shape[0]):
+                single_image = images[i].unsqueeze(0)  # [1, C, H, W]
+                with torch.enable_grad():
+                    loss = self.model(single_image, global_step=self.global_step)
+                self.optimizers().zero_grad()
+                losses.append(loss.detach())
+            self.model.eval()
+            return torch.stack(losses)  # [B]
     
-        self.model.eval()
-        return loss.detach() # ← remove do grafo após calcular
-
+        else:
+            with torch.enable_grad():
+                loss = self.model(images, global_step=self.global_step)
+            self.optimizers().zero_grad()
+            self.model.eval()
+            return loss.detach()
+    
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
-        """Validation step for the Dinomaly model.
-
-        Performs inference on the validation batch to compute anomaly scores
-        and anomaly maps. The model operates in evaluation mode to generate
-        predictions for anomaly detection evaluation.
-
-        Args:
-            batch (Batch): Input batch containing images and metadata.
-            *args: Additional positional arguments (unused).
-            **kwargs: Additional keyword arguments (unused).
-
-        Returns:
-            STEP_OUTPUT: Updated batch with pred_score (anomaly scores) and
-                anomaly_map (pixel-level anomaly maps) predictions.
-
-        Raises:
-            Exception: If an error occurs during validation inference.
-
-        Note:
-            During validation, the model returns InferenceBatch with anomaly
-            scores and maps computed from encoder-decoder feature comparisons.
-        """
-        del args, kwargs  # These variables are not used.
-
-        val_loss = self._compute_validation_loss(batch)
+        del args, kwargs
+    
+        val_loss = self._compute_loss(batch, per_image=False)
         if val_loss is not None:
             self.log("val_loss", val_loss.item(), on_epoch=True, prog_bar=True, logger=True)
-
-
+    
+        predictions = self.model(batch.image)
+        return batch.update(pred_score=predictions.pred_score, anomaly_map=predictions.anomaly_map)
+    
+    def test_step(self, batch: Batch, batch_idx: int, *args, **kwargs) -> STEP_OUTPUT:
+        del args, kwargs, batch_idx
+    
+        self._test_loss_cache = self._compute_loss(batch, per_image=True)
+    
         predictions = self.model(batch.image)
         return batch.update(pred_score=predictions.pred_score, anomaly_map=predictions.anomaly_map)
 
