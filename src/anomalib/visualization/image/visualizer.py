@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
 from anomalib.utils.path import generate_output_filename
 from anomalib.visualization.base import Visualizer
-from anomalib.metrics import AUROC, AUPR #New
+from anomalib.metrics import AUROC, AUPR, F1Max, F1Score, PRO #NEW
 
 from .item_visualizer import (
     DEFAULT_FIELDS_CONFIG,
@@ -209,35 +209,94 @@ class ImageVisualizer(Visualizer):
                     "pred_label",
                     "pixel_auroc",
                     "pixel_aupr",
+                    "pixel_f1max",
+                    "pixel_f1score",
+                    "pixel_pro",
                     "loss",
                 ])
-       
-    
+
     # New function to save per image metrics to CSV. Called from on_test_batch_end after visualization and saving.
     def _compute_and_save_metrics(self, item, vis_filename: Path | None, loss: float | None = None):
-
         """
-        this image receives the image item with metrics associated
-        the visualization filename resulted
-        loss which is a metric
+        Computes and saves per-image pixel-level metrics to CSV.
+        Threshold-free metrics (always reliable):
+            pixel_auroc, pixel_aupr, pixel_f1max
+        Threshold-dependent metrics (reliable when gap = pixel_f1max - pixel_f1score is small):
+            pixel_f1score, pixel_pro
+        Normal images (gt_mask all zeros) write empty pixel metrics.
         """
         if not (hasattr(item, "gt_mask") and item.gt_mask is not None
                 and hasattr(item, "anomaly_map") and item.anomaly_map is not None):
             return
 
+        device = item.anomaly_map.device
+
+        # normal images — pixel metrics undefined without positive gt pixels
+        if item.gt_mask.sum() == 0:
+            if self.metrics_csv:
+                with open(self.metrics_csv, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        str(item.image_path or "unknown"),
+                        str(vis_filename) if vis_filename else "none",
+                        float(item.pred_score) if item.pred_score is not None else "",
+                        str(item.pred_label) if item.pred_label is not None else "",
+                        "", "", "", "", "",  # pixel metrics empty
+                        loss if loss is not None else "",
+                    ])
+            return
+
         results = {}
-        for metric_cls, key in [
-            (AUROC, "pixel_auroc"),
-            (AUPR, "pixel_aupr"),
+
+        # threshold-free metrics
+        for metric_cls, key, fields in [
+            (AUROC,  "pixel_auroc", ["anomaly_map", "gt_mask"]),
+            (AUPR,   "pixel_aupr",  ["anomaly_map", "gt_mask"]),
+            (F1Max,  "pixel_f1max", ["anomaly_map", "gt_mask"]),
         ]:
             try:
-                m = metric_cls(fields=["anomaly_map", "gt_mask"])
+                m = metric_cls(fields=fields).to(device)
                 m.update(item)
                 results[key] = float(m.compute())
                 m.reset()
             except Exception as e:
                 print(f"Erro ao calcular {key} para {item.image_path or 'unknown'}: {e}")
                 results[key] = None
+
+        # threshold-dependent — F1Score
+        for metric_cls, key, fields in [
+            (F1Score, "pixel_f1score", ["pred_mask", "gt_mask"]),
+        ]:
+            try:
+                m = metric_cls(fields=fields).to(device)
+                m.update(item)
+                results[key] = float(m.compute())
+                m.reset()
+            except Exception as e:
+                print(f"Erro ao calcular {key} para {item.image_path or 'unknown'}: {e}")
+                results[key] = None
+
+        # threshold-dependent — PRO (needs explicit shape handling for single image)
+        try:
+            pred_mask = item.pred_mask
+            gt_mask   = item.gt_mask
+            if pred_mask is not None and gt_mask is not None:
+                # ensure (1, 1, H, W) format
+                if pred_mask.ndim == 2:
+                    pred_mask = pred_mask.unsqueeze(0).unsqueeze(0)
+                elif pred_mask.ndim == 3:
+                    pred_mask = pred_mask.unsqueeze(0)
+                if gt_mask.ndim == 2:
+                    gt_mask = gt_mask.unsqueeze(0).unsqueeze(0)
+                elif gt_mask.ndim == 3:
+                    gt_mask = gt_mask.unsqueeze(0)
+                from anomalib.metrics.pro import _PRO
+                m = _PRO().to(device)
+                m.update(pred_mask.float(), gt_mask.float())
+                results["pixel_pro"] = float(m.compute())
+        except Exception as e:
+            print(f"Erro ao calcular pixel_pro para {item.image_path or 'unknown'}: {e}")
+            results["pixel_pro"] = None
 
         if self.metrics_csv:
             with open(self.metrics_csv, "a", newline="") as f:
@@ -247,9 +306,12 @@ class ImageVisualizer(Visualizer):
                     str(vis_filename) if vis_filename else "none",
                     float(item.pred_score) if item.pred_score is not None else "",
                     str(item.pred_label) if item.pred_label is not None else "",
-                    results.get("pixel_auroc", ""),
-                    results.get("pixel_aupr", ""),
-                    loss if loss is not None else "",  # ← new column
+                    results.get("pixel_auroc",   ""),
+                    results.get("pixel_aupr",    ""),
+                    results.get("pixel_f1max",   ""),
+                    results.get("pixel_f1score", ""),
+                    results.get("pixel_pro",     ""),
+                    loss if loss is not None else "",
                 ])
 
 
@@ -447,9 +509,27 @@ class ImageVisualizer(Visualizer):
                 datamodule = getattr(trainer, "datamodule", None)
                 dataset_name = getattr(datamodule, "name", None) if datamodule else None
                 category = getattr(datamodule, "category", None) if datamodule else None
+
+                # For datasets with a flat image folder (e.g. ZJU-Leaper where all
+                # images live in Images/), inject a good/bad subfolder based on
+                # gt_label so normal and anomalous visualizations are separated.
+                # For MVTec-style datasets the input path already encodes the
+                # subfolder (test/good/, test/crack/, test/0/ etc.) so we leave
+                # those untouched.
+                from anomalib.data.utils import LabelName
+                input_path = item.image_path or ""
+                output_path = self.output_dir
+                parent_name = Path(input_path).parent.name
+                is_flat = parent_name not in ("good", "bad", "0") and not any(
+                    part in ("test", "train") for part in Path(input_path).parts
+                )
+                if is_flat and hasattr(item, "gt_label") and item.gt_label is not None:
+                    label_folder = "bad" if int(item.gt_label) == LabelName.ABNORMAL else "good"
+                    output_path = self.output_dir / label_folder
+
                 filename = generate_output_filename(
-                    input_path=item.image_path or "",
-                    output_path=self.output_dir,
+                    input_path=input_path,
+                    output_path=output_path,
                     dataset_name=dataset_name,
                     category=category,
                 )

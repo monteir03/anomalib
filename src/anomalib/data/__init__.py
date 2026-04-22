@@ -65,7 +65,9 @@ from .datamodules.image import (
     MVTecLOCO,
     RealIAD,
     Tabular,
+    TextureAD,
     Visa,
+    ZJULeaper,
 )
 from .datamodules.video import Avenue, ShanghaiTech, UCSDped, VideoDataFormat
 
@@ -83,8 +85,10 @@ from .datasets.image import (
     MVTecADDataset,
     MVTecLOCODataset,
     TabularDataset,
+    TextureADDataset,
     VADDataset,
     VisaDataset,
+    ZJULeaperDataset,
 )
 from .datasets.video import AvenueDataset, ShanghaiTechDataset, UCSDpedDataset
 from .predict import PredictDataset
@@ -194,8 +198,11 @@ __all__ = [
     "MVTecLOCO",
     "RealIAD",
     "Tabular",
+    "TextureAD",
     "VAD",
     "Visa",
+    "ZJULeaper",
+     # Video Data Modules
     # Video Data Modules
     "Avenue",
     "ShanghaiTech",
@@ -213,8 +220,11 @@ __all__ = [
     "MVTecADDataset",
     "MVTecLOCODataset",
     "TabularDataset",
+    "TextureADDataset",
     "VADDataset",
     "VisaDataset",
+    "ZJULeaperDataset",
+
     "AvenueDataset",
     "ShanghaiTechDataset",
     "UCSDpedDataset",

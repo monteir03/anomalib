@@ -38,8 +38,10 @@ from .mvtecad import MVTecADDataset, MVTecDataset
 from .mvtecad2 import MVTecAD2Dataset
 from .realiad import RealIADDataset
 from .tabular import TabularDataset
+from .texture_ad import TextureADDataset
 from .vad import VADDataset
 from .visa import VisaDataset
+from .zju_leaper import ZJULeaperDataset
 
 __all__ = [
     "BMADDataset",
@@ -55,6 +57,8 @@ __all__ = [
     "MVTecLOCODataset",
     "RealIADDataset",
     "TabularDataset",
+    "TextureADDataset",
     "VADDataset",
     "VisaDataset",
+    "ZJULeaperDataset",
 ]

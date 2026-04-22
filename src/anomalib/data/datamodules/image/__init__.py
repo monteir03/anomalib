@@ -44,8 +44,10 @@ from .mvtecad import MVTec, MVTecAD
 from .mvtecad2 import MVTecAD2
 from .realiad import RealIAD
 from .tabular import Tabular
+from .texture_ad import TextureAD
 from .vad import VAD
 from .visa import Visa
+from .zju_leaper import ZJULeaper
 
 
 class ImageDataFormat(str, Enum):
@@ -86,9 +88,10 @@ class ImageDataFormat(str, Enum):
     MVTEC_LOCO = "mvtec_loco"
     REAL_IAD = "realiad"
     TABULAR = "tabular"
+    TEXTURE_AD = "texture_ad"
     VAD = "vad"
     VISA = "visa"
-
+    ZJU_LEAPER = "zju_leaper"
 
 __all__ = [
     "ADAM_3D",
@@ -105,6 +108,8 @@ __all__ = [
     "MVTecLOCO",
     "RealIAD",
     "Tabular",
+    "TextureAD",
     "VAD",
     "Visa",
+    "ZJULeaper",
 ]

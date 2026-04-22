@@ -38,6 +38,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from anomalib.metrics.pimo.pimo import AUPIMO
 import pandas as pd
 from lightning import seed_everything
 from lightning.pytorch.callbacks import EarlyStopping
@@ -55,7 +56,7 @@ from pprint import pprint
 ####################
 ### Personalized ###
 ####################
-from anomalib.metrics import Evaluator, AUROC, F1Score , AUPRO, AUPR
+from anomalib.metrics import Evaluator, AUROC, AUPR, AUPRO, AUPIMO, F1Max, F1Score, PRO
 from anomalib.loggers import AnomalibMLFlowLogger
 from anomalib.visualization import ImageVisualizer
 
@@ -166,8 +167,18 @@ class BenchmarkJob(Job):
             if self.model.name in BATCH_SIZE_ONE:
                 self.datamodule.train_batch_size = 1
 
+            # Patchcore on ZJU-Leaper: reduce coreset sampling ratio to avoid OOM
+            # ZJU-Leaper has ~3000 train images vs ~280 for MVTec, making the
+            # memory bank ~10x larger and causing CUDA OOM during nearest neighbor search.
+            # Reducing from default 0.1 to 0.01 keeps accuracy reasonable while
+            # preventing the 22GB+ allocation that crashes the GPU.
+            if self.model.name == "Patchcore" and self.datamodule.name == "ZJULeaper": #this may not be needed later we see.
+                self.model.model.coreset_sampling_ratio = 0.01
+                self.datamodule.eval_batch_size = 1
+
+
             # models with no training loop — skip fit entirely
-            NO_TRAINING = {"WinClip"}
+            NO_TRAINING = {"WinClip", "Fca"}
 
             # models that need fit but have no val_loss / early stopping
             NO_EARLY_STOPPING = {"Patchcore"}
@@ -176,12 +187,16 @@ class BenchmarkJob(Job):
                 AUROC(fields=["pred_score", "gt_label"], prefix="image_"),
                 AUPR(fields=["pred_score", "gt_label"], prefix="image_"),
                 F1Score(fields=["pred_label", "gt_label"], prefix="image_"),
+                F1Max(fields=["pred_score", "gt_label"], prefix="image_"),
             ]
             pixel_metrics = [
                 AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_"),
                 AUPR(fields=["anomaly_map", "gt_mask"], prefix="pixel_"),
                 AUPRO(fields=["anomaly_map", "gt_mask"], prefix="pixel_"),
                 F1Score(fields=["pred_mask", "gt_mask"], prefix="pixel_"),
+                AUPIMO(fields=["anomaly_map", "gt_mask"], prefix="pixel_", force=True),  # defoult number of thresholds 300_000. fpr_bounds: (min, max). Default: (1e-5, 1e-4)
+                F1Max(fields=["anomaly_map", "gt_mask"], prefix="pixel_"),
+                PRO(fields=["pred_mask", "gt_mask"], prefix="pixel_"), 
             ]
 
             evaluator = Evaluator(
